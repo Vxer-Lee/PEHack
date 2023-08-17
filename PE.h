@@ -39,12 +39,14 @@ private:
 		PIMAGE_OPTIONAL_HEADER  GetOptionPEHeader(){ return m_Option_Header; } //可选PE头
 		DWORD					GetDosStubSize()   { return m_DosStubSize; }   //DOS残留垃圾数据大小
 		DWORD ReadPE_File(__in char* lpszFile, __out LPVOID* pFileBuffer);
+		DWORD WritePE_File(__in unsigned char* pFileBuffer, __in int nSize, __out char* lpszFile);
 		DWORD CopyFileBufferToImageBuffer(__in LPVOID pFileBuffer, __out LPVOID* pImageBuffer);
 
 
 		//功能函数
 		BOOL  RVAToFOA(DWORD RVA, DWORD& FOA,BOOL=FALSE);
 		DWORD FeatureCodeMatch(std::vector<unsigned char> hexData, std::vector<unsigned int>& MachAddress, BYTE* bMask, char* szMask, DWORD AddressBase);
+		DWORD Alignment2Num(int alignment, int num);
 
 		//输出信息
 		void Print_All();
@@ -58,6 +60,9 @@ private:
 		void Print_ImageBuffer_Infomation();
 		void Print_Export_Table();
 		void Print_Import_Table();
+
+		//Hack 黑客(黑魔法) 好玩的东西
+		void Add_Section(const char* section_name,  char* destpath,int sectionSize = 0x200);
 
 	private:
 		//成员
@@ -90,6 +95,7 @@ private:
 			_IMAGE_DATA_DIRECTORY null_table;
 		}*m_Diretory_Table;
 		vector<pair<string, PIMAGE_SECTION_HEADER>> m_vec_section;
+		int m_vec_section_size;//节总大小
 		vector<string> m_vec_import_dllname;
 
 		typedef struct StructV2FAddress
@@ -246,6 +252,7 @@ private:
 		void Anysis_Section_Table();
 		void Anysis_Export_Table();
 		void Anysis_Import_Table();
+
 
 private:
 		//功能函数，私有方法

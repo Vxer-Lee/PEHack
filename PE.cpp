@@ -261,6 +261,31 @@ DWORD PE::ReadPE_File(__in char* lpszFile, __out LPVOID* pFileBuffer)
 	fclose(fp);
 	return nSize;
 }
+
+/***********************************
+* 函数：WritePE_File
+* 说明：写出PE文件到目标路径
+*
+* 参数：
+*	   pFileBuffer 缓冲区指针
+*      nSize       缓冲区大小
+*	   lpszFile    文件路径
+*
+* 返回：失败->0 成功->实际读取大小
+************************************/
+DWORD PE::WritePE_File(__in unsigned char* pFileBuffer,__in int nSize,__out char* lpszFile)
+{
+	FILE* fp = fopen(lpszFile, "wb");
+	if (fp == NULL)
+	{
+		return 0;
+	}
+	fwrite(pFileBuffer, 1, nSize, fp);
+	fclose(fp);
+	return nSize;
+}
+
+
 /***********************************
 * 函数：CopyFileBufferToImageBuffer()
 * 说明：将文件从FileBuffer 拷贝到ImageBuffer
@@ -335,12 +360,15 @@ void PE::Anysis_Section_Table()
 	DWORD dwAddress = (DWORD)(unsigned char*)m_FileBuffer + sizeof(*m_DOS_Header) + m_DosStubSize + sizeof(*m_NT_Header);
 	PIMAGE_SECTION_HEADER tmp_section_header = (PIMAGE_SECTION_HEADER)dwAddress;
 
+	int sum = 0;
 	for (size_t i = 0; i < m_NT_Header->FileHeader.NumberOfSections; i++)
 	{
 		string strTemp = (char*)tmp_section_header->Name;
 		m_vec_section.push_back(pair<string, PIMAGE_SECTION_HEADER>(strTemp, tmp_section_header));
 		tmp_section_header = (PIMAGE_SECTION_HEADER)((DWORD)(unsigned char*)tmp_section_header + sizeof(_IMAGE_SECTION_HEADER));
+		sum += tmp_section_header->PointerToRawData;
 	}
+	m_vec_section_size = sum;
 }
 
 /************************************
@@ -772,6 +800,19 @@ BOOL PE::RVAToFOA(DWORD RVA,DWORD &FOA,BOOL IsEnableLog)
 	//(/ 81)节  RVA : 0x000D0000, FOA : 0x000C7400, 差值(K) = 0x00008C00(35840)
 	//(/ 92)节  RVA : 0x000D2000, FOA : 0x000C9200, 差值(K) = 0x00008E00(36352)
 }
+/************************************
+* 函数：Alignment2Num
+* 说明：获取对齐后的数字
+* ************************************/
+DWORD PE::Alignment2Num(int alignment, int num)
+{
+	int mod = num % alignment;
+	if (mod != 0)
+	{
+		num += alignment - mod;
+	}
+	return num;
+}
 
 void PE::Print_All()
 {
@@ -1182,3 +1223,133 @@ void PE::Print_Import_Table()
 	SetConsoleTextAttribute(handle, 0x07);
 	TRACEEX("\n\n");
 }
+
+
+//=============================================================黑魔法==========================================================
+
+
+/***********************************
+* 函数：Add_Section
+* 说明：添加自定义节(区段)
+* **********************************/
+void PE::Add_Section(const char* section_name,char *destpath, int sectionSize)
+{
+	//-----节名长度,节大小的一些初始化判断------
+	if (strlen(section_name)>8)
+	{
+		printf("报错提示:(添加节名长度不能超过8字符！)\n");
+		return;
+	}
+	//不允许其插入的区块大小 >小于0x200
+	if (sectionSize<0x200)
+	{
+		sectionSize = 0x200;
+	}
+
+
+	//-------计算新节表的位置，大小，文件位置，内存位置，权限等等-------
+	/*
+	* 添加新节表信息
+	  新节信息的位置应该在节表数量*3的位置即：节表开始处+(3 x 0x28=0x78处)，一个节信息固定大小0x28。
+	*/
+	int sectionPos = sizeof(*m_DOS_Header) + m_DosStubSize + sizeof(*m_NT_Header);
+	int newSectionPos = sectionPos + m_vec_section.size() * 0x28;
+	int sectionSizeofSpare = ((int)(m_vec_section.begin())->second->PointerToRawData) - newSectionPos;
+	if (sectionSizeofSpare < 0x28)
+	{
+		printf("报错提示:(该PE文件没有任何空间添加节表信息!)\n");
+		return;
+	}
+	//定义一个新节表
+	IMAGE_SECTION_HEADER newSectionHeader = { 0 };
+
+	//新节的节表名
+	strcpy((char*)newSectionHeader.Name, section_name);
+	//新节表在内存中的位置  (之前最后一个节(内存中节位置+对其后节大小)计算出来的)
+	int VirtualAddress = ((int)(m_vec_section.end() - 1)->second->VirtualAddress) + ((int)(m_vec_section.end() - 1)->second->Misc.VirtualSize);
+	newSectionHeader.VirtualAddress = Alignment2Num(m_Option_Header->SectionAlignment, VirtualAddress);
+	//新节内存大小,必须跟内存对其大小 整除
+	newSectionHeader.Misc.VirtualSize = Alignment2Num(m_Option_Header->SectionAlignment, sectionSize);
+	//新节文件大小 ,必须要跟文件对其大小 整除
+	newSectionHeader.SizeOfRawData   = Alignment2Num(m_Option_Header->FileAlignment, sectionSize);
+	//新节在文件中的位置   ((之前最后一个节(文件中节位置+对其后节大小)计算出来的))
+	newSectionHeader.PointerToRawData = ((int)(m_vec_section.end() - 1)->second->PointerToRawData) + ((int)(m_vec_section.end() - 1)->second->SizeOfRawData);
+	//这些默认 [OBJ重定位偏移]  [OBJ重定位项数目]  [行号表偏移]  [行号表中的数目]
+	newSectionHeader.PointerToRelocations = 0;
+	newSectionHeader.PointerToLinenumbers = 0;
+	newSectionHeader.NumberOfRelocations  = 0;
+	newSectionHeader.NumberOfLinenumbers  = 0;
+	//[标志|属性] 0xe0000060 (包含已初始化数据),(包含可执行代码),(可写),(可读),(可执行)
+	newSectionHeader.Characteristics = 0xe0000060;
+
+
+	//-----------------------在PE头中需要修改的数据----------------------
+	//需要修改[节数量]、[在内存中PE大小 SizeOfImage]
+	WORD sectionnum = m_File_Header->NumberOfSections + 1;
+	DWORD SizeOfImage = newSectionHeader.Misc.VirtualSize;
+
+
+	int sectionnum_pos = m_DOS_Header->e_lfanew + sizeof(m_NT_Header->Signature)+ sizeof(m_File_Header->Machine);
+	int SizeOfImage_pos = m_DOS_Header->e_lfanew + sizeof(m_NT_Header->Signature) + sizeof(*m_File_Header) +
+		//
+		// Standard fields.
+		//
+		sizeof(m_Option_Header->Magic) +
+		sizeof(m_Option_Header->MajorLinkerVersion) +
+		sizeof(m_Option_Header->MinorLinkerVersion) +
+		sizeof(m_Option_Header->SizeOfCode) +
+		sizeof(m_Option_Header->SizeOfInitializedData) +
+		sizeof(m_Option_Header->SizeOfUninitializedData) +
+		sizeof(m_Option_Header->AddressOfEntryPoint) +
+		sizeof(m_Option_Header->BaseOfCode) +
+		sizeof(m_Option_Header->BaseOfData) +
+		//
+		// NT additional fields.
+		//
+		sizeof(m_Option_Header->ImageBase) +
+		sizeof(m_Option_Header->SectionAlignment) +
+		sizeof(m_Option_Header->FileAlignment) +
+		sizeof(m_Option_Header->MajorOperatingSystemVersion) +
+		sizeof(m_Option_Header->MinorOperatingSystemVersion) +
+		sizeof(m_Option_Header->MajorImageVersion) +
+		sizeof(m_Option_Header->MinorImageVersion) +
+		sizeof(m_Option_Header->MajorSubsystemVersion) +
+		sizeof(m_Option_Header->MinorSubsystemVersion) +
+		sizeof(m_Option_Header->Win32VersionValue);
+
+	//-------------------------计算所有节的总文件大小-----------------------------
+	//每个节的文件大小
+	int sectionraw_sum = 0;
+	int sectionimage_sum = 0;
+	for (vector<pair<string, PIMAGE_SECTION_HEADER>>::iterator iter = m_vec_section.begin(); iter != m_vec_section.end(); iter++)
+	{
+		sectionraw_sum += iter->second->SizeOfRawData;
+		sectionimage_sum += Alignment2Num(m_Option_Header->SectionAlignment, iter->second->Misc.VirtualSize);
+	}
+	SizeOfImage += sectionimage_sum + Alignment2Num(m_Option_Header->SectionAlignment, m_Option_Header->SizeOfHeaders);
+	//-------------------------创建新的buffer-------------------------------------
+	int newbufSize = m_Option_Header->SizeOfHeaders + sectionraw_sum   + newSectionHeader.SizeOfRawData;
+	unsigned char* pBuffer = new unsigned char[newbufSize];
+	memset(pBuffer, 0x90, newbufSize);//NOP填充
+	//-----------------------开始将filebuffer移动过去------------------------------
+	memcpy(pBuffer, m_FileBuffer, m_Option_Header->SizeOfHeaders+ sectionraw_sum);
+	void* p = &newSectionHeader;
+	void* src = (unsigned char*)(pBuffer + newSectionPos);
+	int size = sizeof(newSectionHeader);
+	memcpy(src, p, size);
+	//-----------------------------修改PE头---------------------------------------
+	*(WORD*)((unsigned char*)(pBuffer + sectionnum_pos)) = sectionnum;
+	*(DWORD*)((unsigned char*)(pBuffer + SizeOfImage_pos)) = SizeOfImage;
+
+
+	WritePE_File(pBuffer, newbufSize, destpath);
+
+	printf("温馨提示：添加节表成功!，新节名字[%s] 文件大小:[0x%0x] 内存大小:[0x%0x],写出在%s\n", section_name, newSectionHeader.SizeOfRawData, newSectionHeader.Misc.VirtualSize, destpath);
+	return;
+}
+
+
+
+
+
+//=============================================================================================================================
